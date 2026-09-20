@@ -1,0 +1,32 @@
+# Maven build output
+target/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Other IDEs
+.vscode/
+.classpath
+.project
+.settings/
+
+# Environment and secrets (API keys for Week 2)
+.env
+.env.*
+*.key
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Java crash and heap dumps
+hs_err_pid*
+*.hprof
