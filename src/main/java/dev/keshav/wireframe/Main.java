@@ -1,11 +1,15 @@
 package dev.keshav.wireframe;
 
+import dev.keshav.wireframe.http.HttpMethod;
+import dev.keshav.wireframe.http.HttpParseException;
+import dev.keshav.wireframe.http.HttpParser;
+import dev.keshav.wireframe.http.HttpRequest;
+
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.Objects;
 
 public class Main {
@@ -39,105 +43,41 @@ public class Main {
     private static void handleClient(Socket client) {
         try {
             System.out.println("Client connected: " + client.getRemoteSocketAddress());
+
+            // Stop waiting on a stalled/slow client after 5s, so one bad
+            // connection can't block the server forever (see SocketTimeoutException below).
             client.setSoTimeout(5000);
 
-            // ---------- READ THE REQUEST ----------
-
-            // client.getInputStream()   -> raw bytes coming IN from the client (the request)
-            // InputStreamReader         -> converts those bytes into characters (UTF-8)
-            // BufferedReader            -> collects characters and gives us readLine()
+            // Raw bytes coming IN from the client. HttpParser reads directly
+            // from this, no BufferedReader, so headers and body come from
+            // the same stream with nothing buffered ahead and lost.
             InputStream in = client.getInputStream();
 
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            boolean isFirst=true;
-            String method = null;
-            String path = null;
-            String version = null;
-            HashMap<String, String> header = new HashMap<>();
-            int contentLength=0;
+            // Parses the request line, headers, and body (using Content-Length)
+            // into one HttpRequest object. Throws HttpParseException on anything
+            // malformed (bad request line, unknown method, bad/oversized
+            // Content-Length, body cut short, etc) instead of crashing.
+            HttpParser parser = new HttpParser();
+            HttpRequest request = parser.parse(in);
 
-            // Loop per LINE: readLine() gives ONE line per call, without the \r\n.
-            // Stops when:
-            //   line == null    -> the client disconnected
-            //   line.isEmpty()  -> the blank line, which means the headers are finished
-            // The request line and headers are printed as they are read. Real parsing is Day 2.
-            int b;
-            while ((b = in.read()) != -1) {
-                if (b == '\n') {
-                    // 1. Convert accumulated bytes to string and trim trailing \r
-                    String line = baos.toString(StandardCharsets.UTF_8).trim();
-                    baos.reset();
-
-                    // 2. BLANK LINE DETECTED -> End of Headers!
-                    if (line.isEmpty()) {
-                        break; // Stop reading stream immediately!
-                    }
-
-                    // 3. Parse Request Line or Header Key-Value Pair
-                    if (isFirst) {
-                        String[] result = line.split(" ");
-                        if (result.length == 3) {
-                            method = result[0];
-                            path = result[1];
-                            version = result[2];
-                            isFirst = false;
-                        }
-                    } else {
-                        int indexOfColon = line.indexOf(":");
-                        if (indexOfColon != -1) {
-                            String key = line.substring(0, indexOfColon).trim().toLowerCase();
-                            String value = line.substring(indexOfColon + 1).trim();
-                            header.put(key, value);
-                        }
-                    }
-                } else {
-                    // Append character byte to accumulator
-                    baos.write(b);
-                }
+            // Temporary: only handle POST + text/plain bodies for now.
+            // Real routing (different behavior per method/path) is Day 3.
+            String contentType = request.header("content-type");
+            if (contentType != null && contentType.toLowerCase().contains("text/plain") && Objects.equals(request.method(), HttpMethod.POST)) {
+                String requestBody = request.bodyAsString();
+                System.out.println(requestBody);
             }
 
-            if (header.containsKey("content-length")){
-                try {
-                    String value = header.get("content-length");
-                    contentLength=Integer.parseInt(value);
-                } catch (NumberFormatException e){
-                    System.out.println("NumberFormatException" + e);
-                }
-            }
+            System.out.println("Method: " + request.method() + " " + "Path: " + request.path() + " " + "version: " + request.version());
 
-            int MAX_BODY_SIZE= 1048576;
-
-            if (contentLength>0 && contentLength <=MAX_BODY_SIZE ){
-                byte[] content = new byte[contentLength];
-                int totalBytesRead = 0;
-                int bytesRemaining = contentLength;
-                while(totalBytesRead < contentLength){
-
-                    int bytesRead =  in.read(content,totalBytesRead,bytesRemaining);
-
-                    if (bytesRead == -1) break;
-
-                    totalBytesRead += bytesRead;
-                    bytesRemaining-=bytesRead;
-                }
-                String contentType = header.get("content-type");
-                if (contentType != null && contentType.toLowerCase().contains("text/plain") && Objects.equals(method, "POST")) {
-                    String requestBody = new String(content, 0, totalBytesRead, StandardCharsets.UTF_8);
-                    System.out.println(requestBody);
-                }
-            }
-
-            //for now later on we can use switch case or somthing in proper methods
-
-
-            System.out.println("Method: " + method + " " +"Path: " + path + " " + "version: " + version);
-
-            header.forEach((key,value) ->{
+            request.headers().forEach((key, value) -> {
                 System.out.println("Key: " + key + ", Value: " + value);
             });
 
             // ---------- BUILD THE RESPONSE ----------
 
+            // Fixed "Hello" response for every request, whatever method/path
+            // came in. Real per-route responses are Day 3.
             // The body as bytes. We need bytes (not characters) because Content-Length counts bytes.
             byte[] body = "Hello\r\n".getBytes(StandardCharsets.UTF_8);
 
@@ -160,9 +100,18 @@ public class Main {
             // When this method returns, the try-with-resources in main() closes the socket.
 
         } catch (SocketTimeoutException e) {
+            // A client that stalls mid-request (or a fake Content-Length that
+            // never fully arrives) lands here after the 5s timeout above.
             System.err.println("Client timed out: " + client.getRemoteSocketAddress());
-            // Optionally send a 408 Request Timeout if output stream is still usable
+        } catch (HttpParseException e) {
+            // The request was well-formed at the TCP level but broken as HTTP
+            // (bad request line, unknown method, invalid Content-Length...).
+            // e.getStatusCode() carries the right HTTP status (400/413/431/501)
+            // for when we start sending real error responses on Day 5.
+            // No response is sent back yet, this only logs it server-side.
+            System.err.println("Bad request (" + e.getStatusCode() + "): " + e.getMessage());
         } catch (IOException e) {
+            // Any other socket/network failure (connection reset, broken pipe, etc).
             System.err.println("Client I/O error: " + e.getMessage());
         }
     }
